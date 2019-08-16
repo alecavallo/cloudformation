@@ -1,0 +1,686 @@
+Parameters:
+  EnvironmentName:
+    Description: Environment Name
+    Type: String
+    AllowedValues:
+      - development
+      - production
+    ConstraintDescription: must be development or production
+  S3BucketName:
+    Description: name of the S3 bucket to store a copy of the code
+    Type: String
+  SshSecurityGroupDescription:
+    Description: Security Group Description for ssh rules
+    Type: String
+    Default: allow ssh access to host in ASG
+  WebhostSecurityGroupDescription:
+    Description: Security Group Description for direct webhost access rules
+    Type: String
+    Default: allow access to http and https to the backend
+  AlbSecurityGroupDescription:
+    Description: Security Group Description for rules to allow comunication between ALB and backend servers
+    Type: String
+    Default: allow the ALB to access the backend servers
+  SshSecurityGroupIngressCIDR:
+    Description: The IP address range that can be used to ssh into the EC2 instances
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  WebhostSecurityGroupIngressCIDR:
+    Description: The IP address range that can be used to communicate to the EC2 instances (http)
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 127.0.0.1/32
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  TGName:
+    Description: Target group name
+    Type: String
+    MinLength: '1'
+    MaxLength: '50'
+    Default: wordpress
+    AllowedPattern: '\w[\w-_\d]+'
+    ConstraintDescription: the target group name should contain a letter, digit, dash or underscores; and should be less than 50 characters.
+  ALBName:
+    Description: Load balancer name
+    Type: String
+    MinLength: '1'
+    MaxLength: '50'
+    Default: wordpress
+    AllowedPattern: '\w[\w-_\d]+'
+    ConstraintDescription: the load balancer name should contain a letter, digit, dash or underscores; and should be less than 50 characters.
+  InstanceType:
+    Description: 'WebServer EC2 instance type (has default, AllowedValues)'
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t2.xlarge
+      - t3.nano
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m5.large
+      - m5.xlarge
+  DiskSize:
+    Description: Size of disks in ASG
+    Type: Number
+    MinValue: 8
+    MaxValue: 256
+    Default: 8
+    ConstraintDescription: must be development or production
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances. Linked to AWS Parameter
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  ASGMinSize:
+    Description: Size of the ASG
+    Type: Number
+    MinValue: 1
+    MaxValue: 256
+    Default: 1
+    ConstraintDescription: must be a value between 1 and 256
+  ASGMaxSize:
+    Description: Size of the ASG
+    Type: Number
+    MinValue: 1
+    MaxValue: 256
+    Default: 1
+    ConstraintDescription: must be a value between 1 and 256
+  ASGDesired:
+    Description: Size of the ASG
+    Type: Number
+    MinValue: 0
+    MaxValue: 256
+    Default: 1
+    ConstraintDescription: must be a value between 0 and 256
+Mappings:
+  AWSRegionArch2AMI:
+    us-east-1:
+      HVM64: ami-013be31976ca2c322
+    us-west-2:
+      HVM64: ami-061e7ebbc234015fe
+    us-west-1:
+      HVM64: ami-01beb64058d271bc4
+    us-east-2:
+      HVM64: ami-0b59bfac6be064b78
+    sa-east-1:
+      HVM64: ami-0160a8b6087883cb6
+    ca-central-1:
+      HVM64: ami-05cac140c6a1fb960
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Load Balancer Configuration"
+        Parameters:
+          - ALBName
+          - TGName
+          - SecurityGroupID
+          - AlbSecurityGroupDescription
+      - Label:
+          default: "AWS EC2 Configuration"
+        Parameters:
+          - InstanceType
+          - KeyName
+          - DiskSize
+          - SshSecurityGroupDescription
+          - SshSecurityGroupIngressCIDR
+          - WebhostSecurityGroupDescription
+          - WebhostSecurityGroupIngressCIDR
+      - Label:
+          default: "AWS Autoscaling configuration"
+        Parameters:
+          - ASGMinSize
+          - ASGMaxSize
+          - ASGDesired
+    ParameterLabels:
+      VPCID:
+        default: "Which VPC should this be deployed to?"
+Resources:
+  ProdVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      InstanceTenancy: default
+      Tags:
+        - Key: deployment
+          Value: production
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: f1fac21f-2367-4353-9be0-0d14971cf459
+  PubUsEast1a:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref ProdVPC
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.0.0/24
+      Tags:
+        - Key: deployment
+          Value: production
+        - Key: Name
+          Value: WP-us-east-1a
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: f71208e4-5f98-45be-97cc-fca9a12c6e66
+  PubUsEast1b:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref ProdVPC
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.1.0/24
+      Tags:
+        - Key: deployment
+          Value: production
+        - Key: Name
+          Value: WP-us-east-1b
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: c54b57fb-2432-48a4-9535-0445f844bb38
+  PubUsEast1c:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref ProdVPC
+      AvailabilityZone: us-east-1c
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.2.0/24
+      Tags:
+        - Key: deployment
+          Value: production
+        - Key: Name
+          Value: WP-us-east-1c
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 770887b6-198d-4748-a296-9a08cb3e716c
+  PubUsEast1d:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref ProdVPC
+      AvailabilityZone: us-east-1d
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.3.0/24
+      Tags:
+        - Key: deployment
+          Value: production
+        - Key: Name
+          Value: WP-us-east-1d
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 74229506-cd1f-4d1f-8a55-635e59bac78e
+  PubUsEast1e:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref ProdVPC
+      AvailabilityZone: us-east-1e
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.4.0/24
+      Tags:
+        - Key: deployment
+          Value: production
+        - Key: Name
+          Value: WP-us-east-1e
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 46c3bb1b-6992-4fc5-ae29-95b2c6c92809
+  PubUsEast1f:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref ProdVPC
+      AvailabilityZone: us-east-1f
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.0.5.0/24
+      Tags:
+        - Key: deployment
+          Value: production
+        - Key: Name
+          Value: WP-us-east-1f
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: c5addd41-4cbd-4721-bf0d-855b13c0f296
+  ProdIG:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: deployment
+          Value: production
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: d0b68865-779c-4bb4-a450-74cd7e853d87
+  EC2VPCG3BXSA:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref ProdVPC
+      InternetGatewayId: !Ref ProdIG
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 54b69bb2-51c3-4aca-8a13-538ed5b2369a
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref ProdVPC
+  RouteToInternet:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ProdIG
+      RouteTableId: !Ref RouteTable
+  
+  PubUsEast1aRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubUsEast1a
+      RouteTableId: !Ref RouteTable
+  PubUsEast1bRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubUsEast1b
+      RouteTableId: !Ref RouteTable
+  PubUsEast1cRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubUsEast1c
+      RouteTableId: !Ref RouteTable
+  PubUsEast1dRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubUsEast1d
+      RouteTableId: !Ref RouteTable
+  PubUsEast1eRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubUsEast1e
+      RouteTableId: !Ref RouteTable
+  PubUsEast1fRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PubUsEast1f
+      RouteTableId: !Ref RouteTable
+
+  ASG:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+          PropagateAtLaunch: true
+      AutoScalingGroupName: Wordpress
+      LaunchConfigurationName: !Ref LaunchConfig
+      MinSize: !Ref ASGMinSize
+      MaxSize: !Ref ASGMaxSize
+      DesiredCapacity: !Ref ASGDesired
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 100
+      TargetGroupARNs:
+        - !Ref WordpressTG
+      VPCZoneIdentifier:
+        - !Ref PubUsEast1a
+        - !Ref PubUsEast1b
+        - !Ref PubUsEast1c
+        - !Ref PubUsEast1d
+        - !Ref PubUsEast1e
+        - !Ref PubUsEast1f
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 44a4f9b4-cc97-4ac5-a938-6257a8eaa317
+  LaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      ImageId: !FindInMap 
+        - AWSRegionArch2AMI
+        - !Ref 'AWS::Region'
+        - HVM64
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref BalancedServerInstanceProfile
+      InstanceMonitoring: true
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: '50'
+            VolumeType: standard
+      SecurityGroups:
+        - !Ref WebSG
+        - !Ref SshSG
+        - !Ref RsyncIntSG
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash -xe
+
+            # An error exit function
+            error_exit()
+            {
+              echo "$1" 1>&2
+              exit 1
+            }
+
+            # Get the latest CloudFormation package
+            yum update -y aws-cfn-bootstrap
+            amazon-linux-extras install -y php7.2
+            # Start cfn-init
+            /opt/aws/bin/cfn-init -s ${AWS::StackId} -r LaunchConfig --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
+            # Start up the cfn-hup daemon to listen for changes to the EC2 instance metadata
+            /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+            usermod -a -G apache ec2-user
+            chown -R root.apache /var/www/html
+            chmod -R 775 /var/www/html
+            crontab /root/cronjobs
+            # All done so signal success
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource LaunchConfig --region ${AWS::Region}
+            
+    Metadata:
+      Comment: Install a simple PHP application
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              httpd: []
+              php: []
+              jq: []
+              rsync: []
+              xinetd: []
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.WebServerHost.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchConfig --region ${AWS::Region}
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/root/password.txt":
+              content: TEFf5zvil2mj5omwak116t92
+              mode: '000600'
+              owner: root
+              group: root
+            "/etc/rsyncd.secrets":
+              content: |
+                deployer:TEFf5zvil2mj5omwak116t92
+              mode: '000600'
+              owner: root
+              group: root
+            "/etc/rsyncd.conf":
+              content: |
+                [sites]
+                path = /var/www/
+                comment = site files
+                uid = root
+                gid = root
+                list = yes
+                read only = no
+                auth users = deployer
+                secrets file = /etc/rsyncd.secrets
+                timeout = 300
+                hosts allow = 10.0.0.0/255.255.0.0
+              mode: '000644'
+              owner: root
+              group: root
+            "/etc/xinetd.d/rsync":
+              content: |
+                service rsync
+                {
+                disable = no
+                flags = IPv4
+                socket_type = stream
+                port = 873
+                protocol = tcp
+                wait = no
+                user = root
+                server = /usr/bin/rsync
+                server_args = --daemon
+                log_on_failure += USERID
+                }
+
+            "/usr/local/bin/deploy-code.sh":
+              content: !Sub 
+                - |
+                  #!/bin/bash
+                  instanceId=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
+                  region=`curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region`
+                  MY_IP=`curl -s http://169.254.169.254/2009-04-04/meta-data/local-ipv4`
+                  ASGName=`aws autoscaling describe-auto-scaling-instances --instance-id  $instanceId --region $region | jq -r .AutoScalingInstances[0].AutoScalingGroupName`
+                  instancesGroup=`aws autoscaling describe-auto-scaling-groups --region "us-east-1" --auto-scaling-group-name $ASGName | jq -c .AutoScalingGroups[0].Instances| jq -c '.[]'`
+                  for i in $instancesGroup
+                  do
+                  instanceId=`echo $i | jq -r .InstanceId`
+                  server=`aws ec2 describe-instances --region "$region" --instance-ids  $instanceId | jq -r .Reservations[0].Instances[0].PrivateIpAddress`
+                  if [ "$server" != "$MY_IP" ]; then
+                    echo "=== Updating $server..."
+                    rsync -avz --password-file=/root/password.txt /var/www/ deployer@$server::sites
+                    echo "=== Finished the update of $server..."
+                  fi
+                  done;
+
+                  #Update S3 bucket with the last changes in the server
+                  echo "=== Updating Codebase in S3"
+                  echo "====== Syncrhonizing ${AWS::StackName} code"
+                  aws s3 sync --delete --sse --storage-class STANDARD_IA --exclude="content/cache/*" /var/www/ s3://${bucketname}/
+                  echo "=== Finished the update of Codebase in S3"
+                - {bucketname: !Ref WpCodeBucket}
+              mode: '000700'
+              owner: root
+              group: root
+            "/usr/local/bin/sync-code.sh":
+              content: !Sub
+                - |
+                  #!/bin/bash
+                  #SYNCING ANDREWNG.ORG CODE
+                  aws s3 sync --only-show-errors --exclude="content/cache/*" s3://${bucketname}/ /var/www/
+                - {bucketname: !Ref WpCodeBucket}
+              mode: '000700'
+              owner: root
+              group: root
+            "/root/cronjobs": 
+              content: |
+                  @reboot /usr/local/bin/sync-code.sh
+                  #optional: reset instance id from AWS monitoring script when a new instance is created from a preconfigured AMI
+                  @reboot rm /var/tmp/aws-mon/instance-id
+              mode: '000700'
+              owner: root
+              group: root
+
+          services:
+            sysvinit:
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+              xinetd:
+                enabled: 'true'
+                ensureRunning: 'true'
+
+  WordpressTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Ref TGName
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 12
+      HealthCheckPath: /
+      HealthCheckPort: 80
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 2
+      Port: 80
+      Matcher: 
+        HttpCode: 200
+        HttpCode: 301
+        HttpCode: 302
+        HttpCode: 404
+      Protocol: HTTP
+      VpcId: !Ref ProdVPC
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: '30'
+      - Key: slow_start.duration_seconds
+        Value: '40'
+      - Key: stickiness.enabled
+        Value: true
+      - Key: stickiness.lb_cookie.duration_seconds
+        Value: '3600'
+  WordpressALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref ALBName
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups: 
+        - !Ref AlbSG
+      Subnets:
+        - !Ref PubUsEast1a
+        - !Ref PubUsEast1b
+        - !Ref PubUsEast1c
+        - !Ref PubUsEast1d
+        - !Ref PubUsEast1e
+        - !Ref PubUsEast1f
+  WordpressListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      LoadBalancerArn: !Ref WordpressALB
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref WordpressTG
+      Port: 80
+      Protocol: HTTP
+  SshSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref ProdVPC
+      GroupDescription: !Ref SshSecurityGroupDescription
+      SecurityGroupIngress:
+        - CidrIp: !Ref SshSecurityGroupIngressCIDR
+          FromPort: 22
+          ToPort: 22
+          IpProtocol: tcp
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: bc4881dd-42e1-498f-9be9-d63828eaba6b
+  RsyncIntSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref ProdVPC
+      GroupDescription: "allow rsync from internal IP addrs"
+      SecurityGroupIngress:
+        - CidrIp: 10.0.0.0/16
+          FromPort: 873
+          ToPort: 873
+          IpProtocol: tcp
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: bc4881dd-42e1-498f-9be9-d63828eaba6b
+  AlbSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref ProdVPC
+      GroupDescription: !Ref AlbSecurityGroupDescription
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 55bde451-c50b-4533-8027-db58bf936d89
+  WebSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref ProdVPC
+      GroupDescription: !Ref WebhostSecurityGroupDescription
+      SecurityGroupIngress:
+        - CidrIp: !Ref WebhostSecurityGroupIngressCIDR
+          FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+        - SourceSecurityGroupId: !Ref AlbSG
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 821e9174-1b8f-4e69-8d64-189426eb5ff6
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 97b2a62a-fb79-4dc6-8f41-ac97119b65b7
+
+  BalancedServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies: 
+        - 
+          PolicyName: "wp-allow-sync-code"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                  - "s3:GetObject"
+                  - "s3:GetObjectAcl"
+                  - "s3:ListBucket"
+                  - "s3:DeleteObject"
+                Resource: 
+                  - !GetAtt [WpCodeBucket, Arn]
+                  - "arn:aws:s3:::*/*"
+        -
+          PolicyName: "wp-allow-review-ASG"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action:
+                  - "autoscaling:DescribeAutoScalingInstances"
+                  - "autoscaling:DescribeAutoScalingGroups"
+                  - "ec2:DescribeInstances"
+                Resource: "*"
+
+
+  BalancedServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Roles:
+        - !Ref BalancedServerRole
+      InstanceProfileName: BalancedServerRoleInstanceProfile
+
+  WpCodeBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      AccessControl: Private
+      BucketName: !Ref S3BucketName
