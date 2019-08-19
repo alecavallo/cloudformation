@@ -1,0 +1,540 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Deploy the content of a github account as a static website in S3
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Github Configuration"
+        Parameters:
+          - ProjectSource
+          - GithubOwner
+          - GithubRepo
+          - GithubOAuthToken
+          - DevGithubBranch
+          - ProdGithubBranch
+      - Label:
+          default: "Destination S3 buckets configuration"
+        Parameters:
+          - DevArtifactContainerName
+          - ProdArtifactContainerName
+
+Parameters:
+  DevArtifactContainerName:
+    Description: S3 bucket name that will host the artifacts for DEVELOPMENT
+    Type: String
+  ProdArtifactContainerName:
+    Description: S3 bucket name that will host the artifacts for PRODUCTION
+    Type: String
+  DeploymentType:
+    Description: configures deployment for production or development
+    Type: String
+    AllowedValues: ["production", "development", "both"]
+  ProjectSource: 
+    Type: String
+    Default: "https://github.com/myproject/example"
+    Description: "Source control URL (e.g. Github)"
+  GithubOwner:
+    Type: String
+    Default: myuser
+    Description: "Github repo owner"
+  GithubRepo:
+    Type: String
+    Default: my-app
+    Description: "Github repo name"
+  DevGithubBranch:
+    Type: String
+    Default: master
+    Description: "branch used to deploy changes on DEV environment"
+  ProdGithubBranch:
+    Type: String
+    Default: master
+    Description: "branch used to deploy changes on PROD environment"
+  GithubOAuthToken:
+    Type: String
+    Description: "Github personal access token"
+  DeploymentConfirmationTopicName:
+    Description: "Send email notifications when a new deployment is required"
+    Type: String
+    Default: DeploymentAlerts
+  DeploymentConfirmationDest:
+    Description: "destination emails separated by comma"
+    Type: String
+
+#Mappings:
+
+
+Conditions:
+  IsProduction: !Or [!Equals [!Ref DeploymentType, "production"], !Equals [!Ref DeploymentType, "both"]]
+  IsDevelopment: !Or [!Equals [!Ref DeploymentType, "development"], !Equals [!Ref DeploymentType, "both"]]
+Resources:
+  ##DEPLOY BUCKET FOR PRODUCTION
+  ProdDeployBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      BucketName: !Ref ProdArtifactContainerName
+      #CorsConfiguration:
+      #LifecycleConfiguration:
+      #NotificationConfiguration:
+      #VersioningConfiguration:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      Tags:
+        - Key: key
+          Value: value
+    DeletionPolicy: "Retain"
+    Condition: IsProduction
+  ##DEPLOY BUCKET FOR DEVELOPMENT
+  DevDeployBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicRead
+      BucketName: !Ref DevArtifactContainerName
+      #CorsConfiguration:
+      #LifecycleConfiguration:
+      #NotificationConfiguration:
+      #VersioningConfiguration:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      Tags:
+        - Key: key
+          Value: value
+    DeletionPolicy: "Delete"
+    Condition: IsDevelopment
+  
+  ##SNS TOPIC USED TO REQUEST MANUAL APPROVAL
+  DeploymentSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Ref DeploymentConfirmationTopicName
+      Subscription: 
+        - Endpoint: !Ref DeploymentConfirmationDest
+          Protocol: "email"
+      TopicName: !Ref DeploymentConfirmationTopicName
+  
+  ##CODE BUILD CONFIG FOR DEVELOPMENT
+  DevCodeBuild:
+    Type: 'AWS::CodeBuild::Project'
+    Condition: IsDevelopment
+    Properties:
+      Name: !Sub ${AWS::StackName}-DevCodeBuild
+      ServiceRole: !GetAtt DevCodeBuildRole.Arn
+      Artifacts:
+        # The downloaded source code for the build will come from CodePipeline
+        Type: CODEPIPELINE
+        Name: codebuild-buildartifact
+      Source: 
+        Type: CODEPIPELINE
+      Environment:
+        # Linux container with node installed
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/nodejs:8.11.0"
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.1
+          phases:
+            pre_build:
+              commands:
+                - echo Installing Yarn
+                - npm install yarn -g
+                - yarn install
+            build:
+              commands:
+                - echo Build started on `date`
+                - yarn build
+            post_build:
+              commands:
+                # copy the contents of /build to S3
+                - aws s3 cp --recursive --acl public-read ./public s3://${DevDeployBucket}/ 
+                # set the cache-control headers for service-worker.js to prevent
+                # browser caching
+                #- >
+                #  aws s3 cp --acl public-read 
+                #  --cache-control="max-age=0, no-cache, no-store, must-revalidate" 
+                #  ./public/service-worker.js s3://${DevDeployBucket}/
+                # set the cache-control headers for index.html to prevent
+                # browser caching
+                - >
+                  aws s3 cp --acl public-read 
+                  --cache-control="max-age=0, no-cache, no-store, must-revalidate" 
+                  ./public/index.html s3://${DevDeployBucket}/
+                
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: public
+  # IAM role that allows CodeBuild to interact with S3 and CloudWatch
+  DevCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /service-role/
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketVersioning"
+                  - "s3:PutObject"
+                Resource: 
+                  - !GetAtt DevPipelineBucket.Arn
+                  - !Join ['', [!GetAtt DevPipelineBucket.Arn, "/*"]]
+              - 
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketVersioning"
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                Resource: 
+                  - !GetAtt DevDeployBucket.Arn
+                  - !Join ['', [!GetAtt DevDeployBucket.Arn, "/*"]]
+              -
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - "*"
+
+  ##CODE BUILD CONFIG FOR DEVELOPMENT
+  ProdCodeBuild:
+    Type: 'AWS::CodeBuild::Project'
+    Condition: IsProduction
+    Properties:
+      Name: !Sub ${AWS::StackName}-ProdCodeBuild
+      ServiceRole: !GetAtt ProdCodeBuildRole.Arn
+      Artifacts:
+        # The downloaded source code for the build will come from CodePipeline
+        Type: CODEPIPELINE
+        Name: codebuild-buildartifact
+      Source: 
+        Type: CODEPIPELINE
+      Environment:
+        # Linux container with node installed
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/nodejs:8.11.0"
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.1
+          phases:
+            pre_build:
+              commands:
+                - echo Installing Yarn
+                - npm install yarn -g
+                - yarn install
+            build:
+              commands:
+                - echo Build started on `date`
+                - yarn build
+            post_build:
+              commands:
+                # copy the contents of /build to S3
+                - aws s3 cp --recursive --acl public-read ./public s3://${ProdDeployBucket}/ 
+                # set the cache-control headers for service-worker.js to prevent
+                # browser caching
+                #- >
+                #  aws s3 cp --acl public-read 
+                #  --cache-control="max-age=0, no-cache, no-store, must-revalidate" 
+                #  ./public/service-worker.js s3://${ProdDeployBucket}/
+                # set the cache-control headers for index.html to prevent
+                # browser caching
+                - >
+                  aws s3 cp --acl public-read 
+                  --cache-control="max-age=0, no-cache, no-store, must-revalidate" 
+                  ./public/index.html s3://${ProdDeployBucket}/
+                
+          artifacts:
+            files:
+              - '**/*'
+            base-directory: public
+  # IAM role that allows CodeBuild to interact with S3 and CloudWatch
+  ProdCodeBuildRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /service-role/
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketVersioning"
+                  - "s3:PutObject"
+                Resource: 
+                  - !GetAtt ProdPipelineBucket.Arn
+                  - !Join ['', [!GetAtt ProdPipelineBucket.Arn, "/*"]]
+              - 
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketVersioning"
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                Resource: 
+                  - !GetAtt ProdDeployBucket.Arn
+                  - !Join ['', [!GetAtt ProdDeployBucket.Arn, "/*"]]
+              -
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - "*"
+
+  ##PIPELINE FOR DEVELOPMENT
+  DevCodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Condition: IsDevelopment
+    Properties:
+      RoleArn: !GetAtt DevCodePipeLineRole.Arn
+      ArtifactStore:
+        Location: !Ref DevPipelineBucket
+        Type: S3
+      Stages:
+        - 
+          Name: Source
+          Actions: 
+            - 
+              Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              OutputArtifacts: 
+                - 
+                  Name: MyApp
+              Configuration:
+                Owner: !Ref GithubOwner
+                Repo: !Ref GithubRepo
+                Branch: !Ref DevGithubBranch
+                OAuthToken: !Ref GithubOAuthToken
+        - 
+          Name: Build
+          Actions: 
+            - 
+              Name: BuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts: 
+                - 
+                  Name: MyApp
+              OutputArtifacts: 
+                - 
+                  Name: MyAppBuild
+              Configuration:
+                ProjectName: !Ref DevCodeBuild
+  #CODE PIPELINE ROLE FOR DEVELOPMENT ENVIRONMENT
+  DevCodePipeLineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketVersioning"
+                  - "s3:PutObject"
+                Resource: 
+                  - !GetAtt DevPipelineBucket.Arn
+                  - !Join ['', [!GetAtt DevPipelineBucket.Arn, "/*"]]
+              - 
+                Effect: Allow  
+                Action:
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "sns:Publish"
+                Resource:
+                  - !Ref DeploymentSnsTopic
+  # Temp bucket for storing build artifacts
+  DevPipelineBucket: 
+    Type: 'AWS::S3::Bucket'
+    Condition: IsDevelopment
+    Properties: {}
+  
+
+  ##PIPELINE FOR PRODUCTION
+  ProdCodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Condition: IsProduction
+    Properties:
+      RoleArn: !GetAtt ProdCodePipeLineRole.Arn
+      ArtifactStore:
+        Location: !Ref ProdPipelineBucket
+        Type: S3
+      Stages:
+        - 
+          Name: Source
+          Actions: 
+            - 
+              Name: SourceAction
+              ActionTypeId: 
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: 1
+              OutputArtifacts: 
+                - 
+                  Name: Prod
+              Configuration:
+                Owner: !Ref GithubOwner
+                Repo: !Ref GithubRepo
+                Branch: !Ref ProdGithubBranch
+                OAuthToken: !Ref GithubOAuthToken
+        -
+          Name: ManualApproval
+          Actions:
+            -
+              Name: ApprovalAction
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+          
+              Configuration:
+                NotificationArn: !Ref DeploymentSnsTopic
+                CustomData: "Approval or Reject this change after deploying it to development"
+              RunOrder: 1
+        - 
+          Name: Build
+          Actions: 
+            - 
+              Name: BuildAction
+              ActionTypeId: 
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              InputArtifacts: 
+                - 
+                  Name: Prod
+              OutputArtifacts: 
+                - 
+                  Name: ProdBuild
+              Configuration:
+                ProjectName: !Ref ProdCodeBuild
+  #CODE PIPELINE ROLE FOR DEVELOPMENT ENVIRONMENT
+  ProdCodePipeLineRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:GetBucketVersioning"
+                  - "s3:PutObject"
+                Resource: 
+                  - !GetAtt ProdPipelineBucket.Arn
+                  - !Join ['', [!GetAtt ProdPipelineBucket.Arn, "/*"]]
+              - 
+                Effect: Allow  
+                Action:
+                  - "codebuild:BatchGetBuilds"
+                  - "codebuild:StartBuild"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "sns:Publish"
+                Resource:
+                  - !Ref DeploymentSnsTopic
+  # Temp bucket for storing build artifacts
+  ProdPipelineBucket: 
+    Type: 'AWS::S3::Bucket'
+    Condition: IsProduction
+    Properties: {}
+
+    
+Outputs:
+  ProdWebsiteURL:
+    Value: !GetAtt
+      - ProdDeployBucket
+      - WebsiteURL
+    Description: URL for production website hosted on S3
+    Condition: IsProduction
+  DevWebsiteURL:
+    Value: !GetAtt
+      - DevDeployBucket
+      - WebsiteURL
+    Description: URL for website hosted on S3
+    Condition: IsDevelopment
+  ManualApprovalArn:
+    Value: !Ref DeploymentSnsTopic
