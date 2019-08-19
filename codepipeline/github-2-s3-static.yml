@@ -59,6 +59,9 @@ Parameters:
   DeploymentConfirmationDest:
     Description: "destination emails separated by comma"
     Type: String
+  DevSlackWebhook:
+    Description: "Slack webhook URL"
+    Type: String
 
 #Mappings:
 
@@ -76,7 +79,8 @@ Resources:
       #CorsConfiguration:
       #LifecycleConfiguration:
       #NotificationConfiguration:
-      #VersioningConfiguration:
+      VersioningConfiguration:
+        Status: Enabled
       WebsiteConfiguration:
         IndexDocument: index.html
         ErrorDocument: error.html
@@ -113,6 +117,145 @@ Resources:
         - Endpoint: !Ref DeploymentConfirmationDest
           Protocol: "email"
       TopicName: !Ref DeploymentConfirmationTopicName
+
+  
+  # #REPO FOR LAMBDA FUNCTION USED TO PUSH TO SLACK
+  # s3Bucket:
+  #   Type: AWS::S3::Bucket
+  #   Properties: 
+  #     AccessControl: Private
+  #     BucketName: !Join ['', [!GetAtt DevPipelineBucket.Arn, "-pipeline2slack-lambda-repo"]]
+
+  #LAMBDA FUNCTION TO PUBLISH UPDATES TO SLACK
+  BasicLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - 
+         PolicyName: "root"
+         PolicyDocument:
+           Version: "2012-10-17"
+           Statement:
+              - 
+                Effect: "Allow"
+                Action: "*"
+                Resource: "*"
+  DevLambdaFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsDevelopment
+    Properties:
+      Description: "push deployment notifications to slack"
+      FunctionName: "pipeline2slack"
+      Handler: "index.handler"
+      MemorySize: 128
+      Role: 
+        Fn::GetAtt: 
+        - "BasicLambdaExecutionRole"
+        - "Arn"
+      Runtime: nodejs8.10
+      Timeout: 12
+      Environment:
+        Variables:
+          WEBHOOK: !Ref DevSlackWebhook # A map of key-value pairs that the Lambda function can access
+          DEPLOYMENT: !Ref DevArtifactContainerName
+      Code:
+        ZipFile: |
+          console.log('Loading Action');
+          
+
+          var AWS = require("aws-sdk");
+          var codepipeline = new AWS.CodePipeline();
+
+          const https = require('https');
+          const url = require('url');
+          const slack_url = process.env.WEBHOOK;
+          const slack_req_opts = url.parse(slack_url);
+          slack_req_opts.method = 'POST';
+          slack_req_opts.headers = {
+              'Content-Type': 'application/json'
+          };
+
+          exports.handler = function(event, context) {
+              console.log("Received:", JSON.stringify(event, null, 2));
+              var eventText = null;
+              var jobId = null;
+              
+              if(event["CodePipeline.job"]){
+              eventText = event["CodePipeline.job"].data.actionConfiguration.configuration.UserParameters;
+              }else if(event["detail"]){
+              var status = event["detail"]["build-status"];   
+              var projectName = event["detail"]["project-name"]; 
+              eventText = "Production Environment : " + projectName + " is : "+ status;
+              }
+              
+              console.log("Receivedage:", eventText);
+              if(event["CodePipeline.job"]){
+              jobId = event["CodePipeline.job"].id;
+              }else if(event["detail"]){
+              jobId = event["id"]; 
+              }
+
+              var req = https.request(slack_req_opts, function(res) {
+                  if (res.statusCode === 200) {
+                      context.succeed('posted to slack');
+                  } else {
+                      context.fail('status: ' + res.statusCode);
+                  }
+              });
+
+              req.on('error', function(e) {
+                  console.log('problem request: ' + e.message);
+                  context.fail(e.message);
+              });
+
+              var params = {
+                  text: `:loudspeaker: The Job ID ${jobId} has been pushed to the bucket ${process.env.DEPLOYMENT}`,
+                  attachments: [{
+                      fallback: eventText,
+                      color: "#45d348",
+                      author_name: "Author: AWS CodePipeline",
+                      title: "New Deployment detected",
+                      fields: [{
+                          "value": eventText,
+                          "short": false
+                      }]
+                  }]
+              };
+
+              req.write(JSON.stringify(params));
+
+              req.end();
+
+              if(event["CodePipeline.job"]){
+                  // Notify AWS CodePipeline of a successful job
+                  var putJobSuccess = function(message) {
+                      var params = {
+                          jobId: jobId
+                      };
+                      codepipeline.putJobSuccessResult(params, function(err, data) {
+                          if (err) {
+                              context.fail(err);
+                          } else {
+                              context.succeed(message);
+                          }
+                      });
+                  };
+
+                  // Succeed the job
+              putJobSuccess("Notification has been sent to Slack Channel.");
+              }
+              console.log("Process");
+          }
   
   ##CODE BUILD CONFIG FOR DEVELOPMENT
   DevCodeBuild:
@@ -216,6 +359,7 @@ Resources:
                   - "logs:PutLogEvents"
                 Resource:
                   - "*"
+              
 
   ##CODE BUILD CONFIG FOR DEVELOPMENT
   ProdCodeBuild:
@@ -367,6 +511,20 @@ Resources:
                   Name: MyAppBuild
               Configuration:
                 ProjectName: !Ref DevCodeBuild
+              
+        -
+          Name: SendNotifications
+          Actions:
+            -
+              Name: "PushToSlack"
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: 1
+                Provider: Lambda
+              Configuration:
+                FunctionName: !Ref DevLambdaFunction
+                UserParameters: "Development environment has been updated!"
   #CODE PIPELINE ROLE FOR DEVELOPMENT ENVIRONMENT
   DevCodePipeLineRole:
     Type: AWS::IAM::Role
@@ -407,6 +565,12 @@ Resources:
                   - "sns:Publish"
                 Resource:
                   - !Ref DeploymentSnsTopic
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                  - "lambda:InvokeAsync"
+                Resource:
+                  - !GetAtt DevLambdaFunction.Arn
   # Temp bucket for storing build artifacts
   DevPipelineBucket: 
     Type: 'AWS::S3::Bucket'
@@ -475,6 +639,20 @@ Resources:
                   Name: ProdBuild
               Configuration:
                 ProjectName: !Ref ProdCodeBuild
+        -
+          Name: SendNotifications
+          Actions:
+            -
+              Name: "PushToSlack"
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Version: 1
+                Provider: Lambda
+              Configuration:
+                FunctionName: !Ref DevLambdaFunction
+                UserParameters: "Production environment has been updated!"
+
   #CODE PIPELINE ROLE FOR DEVELOPMENT ENVIRONMENT
   ProdCodePipeLineRole:
     Type: AWS::IAM::Role
@@ -516,6 +694,12 @@ Resources:
                   - "sns:Publish"
                 Resource:
                   - !Ref DeploymentSnsTopic
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                  - "lambda:InvokeAsync"
+                Resource:
+                  - !GetAtt DevLambdaFunction.Arn
   # Temp bucket for storing build artifacts
   ProdPipelineBucket: 
     Type: 'AWS::S3::Bucket'
